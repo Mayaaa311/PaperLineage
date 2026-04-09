@@ -5,11 +5,17 @@ import json
 import math
 import os
 import re
+from io import BytesIO
 from typing import Any
 
 import httpx
 
 from .llm_cache import get_cached_json, set_cached_json
+
+try:
+    from pypdf import PdfReader
+except Exception:  # pragma: no cover - optional dependency
+    PdfReader = None
 
 OPENAI_API_URL = os.getenv("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -65,6 +71,23 @@ DEPENDENCY_STOPWORDS = {
     "paper",
     "approach",
     "neural",
+}
+
+LIMITATION_KEYWORDS = {
+    "limitation",
+    "limited",
+    "constraint",
+    "future work",
+    "fails",
+    "failure",
+    "does not",
+    "cannot",
+    "only",
+    "assumption",
+    "expensive",
+    "compute",
+    "generalization",
+    "robustness",
 }
 
 
@@ -440,6 +463,194 @@ def _split_sentences(text: str | None) -> list[str]:
     return [x.strip() for x in parts if len(x.strip()) >= 20][:14]
 
 
+def _normalize_whitespace(text: str) -> str:
+    text = (text or "").replace("\x00", " ")
+    text = text.replace("\r", "\n")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _looks_like_pdf(url: str) -> bool:
+    lower = (url or "").lower()
+    return lower.endswith(".pdf") or "/pdf?" in lower or "/pdf/" in lower
+
+
+def _maybe_pdf_variant(url: str) -> str | None:
+    raw = (url or "").strip()
+    if not raw:
+        return None
+    lower = raw.lower()
+    if "openreview.net" in lower and "/forum" in lower and "?id=" in raw:
+        match = re.search(r"[?&]id=([^&]+)", raw)
+        if match:
+            return f"https://openreview.net/pdf?id={match.group(1)}"
+    if "arxiv.org/abs/" in lower:
+        token = raw.rstrip("/").split("/abs/")[-1]
+        return f"https://arxiv.org/pdf/{token}.pdf"
+    return None
+
+
+def _extract_section_span(text: str, headings: tuple[str, ...], max_chars: int = 4200) -> str:
+    if not text:
+        return ""
+    pattern = r"(?im)^\s*(?:\d+(?:\.\d+)*)?\s*(?:" + "|".join(headings) + r")\s*$"
+    match = re.search(pattern, text)
+    if not match:
+        return ""
+    start = match.end()
+    tail = text[start:]
+    next_heading = re.search(
+        r"(?im)^\s*(?:\d+(?:\.\d+)*)?\s*[A-Z][A-Za-z0-9 ,:;()\/\-]{2,80}\s*$",
+        tail,
+    )
+    end = start + (next_heading.start() if next_heading else min(len(tail), max_chars))
+    section = text[start:end].strip()
+    if len(section) > max_chars:
+        section = section[:max_chars].strip()
+    return section
+
+
+def _extract_section_window(text: str, keyword: str, window: int = 2600) -> str:
+    lower = text.lower()
+    idx = lower.find(keyword.lower())
+    if idx < 0:
+        return ""
+    start = max(0, idx - 180)
+    end = min(len(text), idx + window)
+    return text[start:end].strip()
+
+
+def _extract_discussion_conclusion_context(text: str) -> dict[str, str]:
+    clean = _normalize_whitespace(text)
+    discussion = _extract_section_span(
+        clean,
+        (
+            "discussion",
+            "discussion and analysis",
+            "analysis and discussion",
+            "limitations",
+            "limitations and future work",
+        ),
+    )
+    conclusion = _extract_section_span(
+        clean,
+        (
+            "conclusion",
+            "conclusions",
+            "conclusion and future work",
+            "conclusions and future work",
+            "future work",
+        ),
+    )
+
+    if len(discussion) < 120:
+        discussion = _extract_section_window(clean, "discussion")
+    if len(discussion) < 120:
+        discussion = _extract_section_window(clean, "limitation")
+
+    if len(conclusion) < 120:
+        conclusion = _extract_section_window(clean, "conclusion")
+    if len(conclusion) < 120:
+        conclusion = _extract_section_window(clean, "future work")
+
+    return {
+        "discussion": discussion[:3600],
+        "conclusion": conclusion[:3600],
+    }
+
+
+def _extract_pdf_text(url: str) -> str:
+    if PdfReader is None:
+        return ""
+    if not url:
+        return ""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/pdf,*/*",
+    }
+    try:
+        with httpx.Client(timeout=httpx.Timeout(35.0), follow_redirects=True) as client:
+            response = client.get(url, headers=headers)
+            response.raise_for_status()
+            content = response.content or b""
+            content_type = (response.headers.get("content-type") or "").lower()
+    except Exception:
+        return ""
+
+    if not content:
+        return ""
+    if "pdf" not in content_type and not content.startswith(b"%PDF"):
+        return ""
+
+    try:
+        reader = PdfReader(BytesIO(content))
+    except Exception:
+        return ""
+
+    pages: list[str] = []
+    max_pages = min(len(reader.pages), 22)
+    for idx in range(max_pages):
+        try:
+            text = reader.pages[idx].extract_text() or ""
+        except Exception:
+            continue
+        text = text.strip()
+        if text:
+            pages.append(text)
+    return _normalize_whitespace("\n\n".join(pages))
+
+
+def _get_limitation_context(paper: dict) -> dict[str, str]:
+    cache_payload = {
+        "v": "discussion-conclusion-v1",
+        "title": paper.get("title"),
+        "url": paper.get("url"),
+        "external_id": paper.get("external_id"),
+    }
+    cache_key = "lim_ctx:" + hashlib.sha256(
+        json.dumps(cache_payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    cached = get_cached_json(cache_key)
+    if cached:
+        return {
+            "discussion": str(cached.get("discussion") or ""),
+            "conclusion": str(cached.get("conclusion") or ""),
+            "source": str(cached.get("source") or "none"),
+        }
+
+    url = str(paper.get("url") or "").strip()
+    candidates: list[str] = []
+    if url:
+        candidates.append(url)
+        variant = _maybe_pdf_variant(url)
+        if variant and variant not in candidates:
+            candidates.insert(0, variant)
+
+    discussion = ""
+    conclusion = ""
+    source = "none"
+    for candidate in candidates:
+        if not _looks_like_pdf(candidate) and candidate != candidates[0]:
+            continue
+        text = _extract_pdf_text(candidate)
+        if not text:
+            continue
+        extracted = _extract_discussion_conclusion_context(text)
+        discussion = extracted.get("discussion", "")
+        conclusion = extracted.get("conclusion", "")
+        source = f"pdf:{candidate}"
+        if discussion or conclusion:
+            break
+
+    result = {"discussion": discussion, "conclusion": conclusion, "source": source}
+    set_cached_json(cache_key, result)
+    return result
+
+
 def _pick_sentence(sentences: list[str], keywords: list[str], used: set[int]) -> tuple[int | None, str]:
     for i, sent in enumerate(sentences):
         if i in used:
@@ -515,36 +726,33 @@ def _build_sectioned_fallback_analysis(paper: dict) -> dict[str, Any]:
     }
 
 
-def _build_limitations_fallback(paper: dict) -> list[str]:
-    sentences = _split_sentences(paper.get("abstract"))
+def _build_limitations_fallback(section_context: dict[str, str]) -> list[str]:
+    discussion = str(section_context.get("discussion") or "")
+    conclusion = str(section_context.get("conclusion") or "")
+    source = str(section_context.get("source") or "source")
+    combined = "\n".join([discussion, conclusion]).strip()
+    sentences = _split_sentences(combined)
     if not sentences:
         return [
-            "The abstract does not report clear failure modes; check discussion/appendix for explicit limitations.",
+            f"Could not extract Discussion/Conclusion text from {source}; limitations unavailable until those sections are accessible.",
         ]
-    limitation_keywords = [
-        "however",
-        "limitation",
-        "challenge",
-        "restrict",
-        "cost",
-        "compute",
-        "data",
-        "unseen",
-        "generalization",
-        "future work",
-        "remain",
-    ]
-    hits = []
+
+    hits: list[str] = []
     for sent in sentences:
         lower = sent.lower()
-        if any(k in lower for k in limitation_keywords):
+        if len(re.findall(r"\b[A-Z][a-z]+ [A-Z][a-z]+\b", sent)) >= 3:
+            # Skip author/reference-like lines that often appear near references.
+            continue
+        if any(k in lower for k in LIMITATION_KEYWORDS):
             hits.append(sent)
-        if len(hits) >= 2:
+        if len(hits) >= 3:
             break
-    if hits:
-        return [f"Potential limitation inferred from abstract: {x}" for x in hits[:2]]
+
+    cleaned = [re.sub(r"\s+", " ", x).strip() for x in hits if x.strip()]
+    if cleaned:
+        return cleaned[:3]
     return [
-        "Potential limitation: evidence in the abstract may not cover all domains/settings; verify robustness sections for boundary conditions.",
+        f"Discussion/Conclusion text was available from {source}, but no explicit limitation sentence was detected.",
     ]
 
 
@@ -589,7 +797,8 @@ def generate_paper_analysis(paper: dict, references: list[dict]) -> dict[str, An
     heuristic_deps = _heuristic_analysis_dependencies(ref_items, max_dependencies=3)
     heuristic_dataset_deps = _heuristic_analysis_dataset_dependencies(ref_items, max_dependencies=5)
     sectioned_fallback = _build_sectioned_fallback_analysis(paper)
-    limitations_fallback = _build_limitations_fallback(paper)
+    limitation_context = _get_limitation_context(paper)
+    limitations_fallback = _build_limitations_fallback(limitation_context)
     fallback = {
         "quick_takeaways": sectioned_fallback["quick_takeaways"],
         "logic_summary": sectioned_fallback["logic_summary"],
@@ -610,7 +819,9 @@ def generate_paper_analysis(paper: dict, references: list[dict]) -> dict[str, An
         "Prioritize cues from introduction/problem framing and method description. "
         "For evidence points, explicitly name section roles (Introduction, Method, Main Evaluation, Ablation/Analysis) "
         "and state what each section argues for. "
-        "Also output 1-3 concrete limitations/risks grounded in paper scope, assumptions, or evaluation coverage. "
+        "For limitations, use ONLY discussion/conclusion context provided by the user payload. "
+        "Do not infer limitations from abstract alone. "
+        "If discussion/conclusion context is empty, return an empty limitations list. "
         "Return strict JSON only."
     )
     user_prompt = json.dumps(
@@ -622,6 +833,11 @@ def generate_paper_analysis(paper: dict, references: list[dict]) -> dict[str, An
                 "venue": paper.get("venue"),
                 "year": paper.get("year"),
                 "citation_count": paper.get("citation_count", 0),
+            },
+            "limitation_context": {
+                "source": limitation_context.get("source"),
+                "discussion": (limitation_context.get("discussion") or "")[:3000],
+                "conclusion": (limitation_context.get("conclusion") or "")[:3000],
             },
             "candidate_references": ref_items,
             "requirements": {
@@ -638,7 +854,7 @@ def generate_paper_analysis(paper: dict, references: list[dict]) -> dict[str, An
                     "[Section: Ablation/Analysis] what components/claims are validated.",
                 ],
                 "limitations": [
-                    "1-3 concise limits of scope/assumptions/data coverage or robustness.",
+                    "1-3 concise limits inferred from discussion/conclusion only.",
                 ],
                 "key_dependencies": [
                     {

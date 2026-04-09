@@ -10,6 +10,7 @@ let currentPage = 1;
 let totalPages = 1;
 let currentAllPaperIds = [];
 let currentCy = null;
+let currentFavorites = [];
 
 const searchForm = document.getElementById("search-form");
 const searchModeEl = document.getElementById("search-mode");
@@ -47,6 +48,11 @@ const graphEmpty = document.getElementById("graph-empty");
 const graphEl = document.getElementById("graph");
 const edgeExplainer = document.getElementById("edge-explainer");
 const graphResetBtn = document.getElementById("graph-reset-view");
+const visualizeFavoritesLinksBtn = document.getElementById("visualize-favorites-links");
+const favoritesGraphModal = document.getElementById("favorites-graph-modal");
+const favoritesGraphPicker = document.getElementById("favorites-graph-picker");
+const favoritesGraphCancelBtn = document.getElementById("favorites-graph-cancel");
+const favoritesGraphOpenBtn = document.getElementById("favorites-graph-open");
 
 function resolveReadableUrl(rawUrl) {
   if (typeof rawUrl !== "string") {
@@ -154,7 +160,7 @@ function renderPaperCards(container, papers, inFavorites = false) {
     });
 
     detailBtn.addEventListener("click", () => {
-      loadPaperDetail(paper.id);
+      loadPaperDetail(paper.id, { fromFavorites: inFavorites });
     });
 
     const readableUrl = resolveReadableUrl(paper.url);
@@ -327,14 +333,90 @@ function updateSearchModeUI() {
 async function loadFavorites() {
   try {
     const data = await api(`/api/favorites?user_id=${encodeURIComponent(USER_ID)}`);
-    renderPaperCards(favoritesList, data.papers, true);
+    currentFavorites = Array.isArray(data.papers) ? data.papers : [];
+    renderPaperCards(favoritesList, currentFavorites, true);
   } catch (err) {
+    currentFavorites = [];
     favoritesList.classList.add("empty");
     favoritesList.textContent = `Failed to load favorites: ${err.message}`;
   }
 }
 
-async function loadPaperDetail(paperId) {
+function openFavoritesGraphModal() {
+  if (!currentFavorites.length) {
+    alert("No favorites to visualize yet.");
+    return;
+  }
+  favoritesGraphPicker.innerHTML = "";
+  currentFavorites.forEach((paper) => {
+    const label = document.createElement("label");
+    label.className = "modal-paper-item";
+    label.innerHTML = `
+      <input type="checkbox" value="${paper.id}" checked />
+      <div>
+        <p class="modal-paper-title">${paper.title}</p>
+        <p class="modal-paper-meta">${paper.venue || "Unknown venue"} • ${paper.year || "Unknown year"} • Citations: ${paper.citation_count || 0}</p>
+      </div>
+    `;
+    favoritesGraphPicker.appendChild(label);
+  });
+  favoritesGraphModal.classList.remove("hidden");
+  favoritesGraphModal.setAttribute("aria-hidden", "false");
+}
+
+function closeFavoritesGraphModal() {
+  favoritesGraphModal.classList.add("hidden");
+  favoritesGraphModal.setAttribute("aria-hidden", "true");
+}
+
+function openFavoritesGraphPage() {
+  const selected = Array.from(
+    favoritesGraphPicker.querySelectorAll("input[type='checkbox']:checked")
+  ).map((x) => x.value);
+  if (!selected.length) {
+    alert("Select at least one paper.");
+    return;
+  }
+  const payload = {
+    user_id: USER_ID,
+    paper_ids: selected,
+    created_at: Date.now(),
+  };
+  sessionStorage.setItem("favoritesGraphSelection", JSON.stringify(payload));
+  window.location.href = "/favorites-links";
+}
+
+async function loadCachedTraceForPaper(paperId) {
+  try {
+    const data = await api(
+      `/api/traces/by-paper/latest?paper_id=${encodeURIComponent(paperId)}&user_id=${encodeURIComponent(USER_ID)}`
+    );
+    if (!data?.found || !data.trace) {
+      traceStatus.textContent = "No cached lineage graph yet. Building cache now...";
+      const traceDepth = parseInt(traceDepthInput.value, 10);
+      const start = await api("/api/traces", "POST", {
+        user_id: USER_ID,
+        paper_id: paperId,
+        trace_depth: Number.isFinite(traceDepth) ? traceDepth : 2,
+      });
+      activeTraceId = start.trace_id;
+      await pollTraceStatus(activeTraceId);
+      return;
+    }
+    const trace = data.trace;
+    activeTraceId = trace.trace_id;
+    renderGraph(trace);
+    traceStatus.textContent = `Loaded cached trace (depth ${trace.trace_depth}). Nodes: ${trace.nodes.length}, edges: ${trace.edges.length}`;
+  } catch (err) {
+    graphEl.style.display = "none";
+    graphEmpty.style.display = "block";
+    graphEmpty.textContent = "Failed to load cached lineage graph.";
+    traceStatus.textContent = `Cached trace lookup failed: ${err.message}`;
+  }
+}
+
+async function loadPaperDetail(paperId, opts = {}) {
+  const fromFavorites = !!opts.fromFavorites;
   detailEmpty.classList.add("hidden");
   detailContent.classList.remove("hidden");
   detailTitle.textContent = "Loading...";
@@ -348,11 +430,23 @@ async function loadPaperDetail(paperId) {
   detailLimitations.innerHTML = "";
   detailKeyDeps.innerHTML = "";
   detailDatasetDeps.innerHTML = "";
-  traceStatus.textContent = "";
+  traceStatus.textContent = fromFavorites
+    ? "Loading cached summary and cached lineage graph..."
+    : "";
   currentPaperId = paperId;
+  activeTraceId = null;
+  currentCy = null;
+  graphEl.style.display = "none";
+  graphEmpty.style.display = "block";
+  graphEmpty.textContent = fromFavorites
+    ? "Loading cached lineage graph..."
+    : "Run trace-back to generate lineage graph.";
 
   try {
-    const data = await api(`/api/papers/${paperId}?user_id=${encodeURIComponent(USER_ID)}`);
+    const detailUrl = `/api/papers/${paperId}?user_id=${encodeURIComponent(USER_ID)}${
+      fromFavorites ? "&prefer_cached=true" : ""
+    }`;
+    const data = await api(detailUrl);
     detailTitle.textContent = data.title;
     const reviewText = (data.review_score_avg !== null && data.review_score_avg !== undefined)
       ? ` • Review: ${Number(data.review_score_avg).toFixed(2)}${data.review_count ? ` (n=${data.review_count})` : ""}`
@@ -369,6 +463,11 @@ async function loadPaperDetail(paperId) {
     renderBulletList(detailLimitations, data.limitations, "No explicit limitations extracted yet.");
     renderDependencyList(detailKeyDeps, data.key_dependencies || [], "No high-confidence dependency extracted.");
     renderDependencyList(detailDatasetDeps, data.dataset_dependencies || [], "No dataset/benchmark paper extracted.");
+    if (fromFavorites) {
+      await loadCachedTraceForPaper(paperId);
+    } else {
+      traceStatus.textContent = "";
+    }
   } catch (err) {
     detailTitle.textContent = "Failed to load paper";
     detailMeta.textContent = "";
@@ -497,6 +596,30 @@ async function pollTraceStatus(traceId) {
 }
 
 function renderGraph(traceData) {
+  const incomingCountByNode = new Map();
+  (traceData.nodes || []).forEach((node) => {
+    incomingCountByNode.set(node.paper_id, 0);
+  });
+  (traceData.edges || []).forEach((edge) => {
+    const target = edge.target_paper_id;
+    incomingCountByNode.set(target, (incomingCountByNode.get(target) || 0) + 1);
+  });
+  const maxIncoming = Math.max(0, ...Array.from(incomingCountByNode.values()));
+
+  const nodeColorFromIncoming = (incoming) => {
+    if (!incoming || incoming <= 0) {
+      return "#c8d7cf";
+    }
+    const ratio = maxIncoming > 0 ? incoming / maxIncoming : 0;
+    if (ratio >= 0.67) {
+      return "#0f6b55";
+    }
+    if (ratio >= 0.34) {
+      return "#2f9b76";
+    }
+    return "#7abf9f";
+  };
+
   const edgeTierFromConfidence = (confidence) => {
     const value = Number.isFinite(confidence) ? confidence : 0.0;
     if (value >= 0.78) {
@@ -582,12 +705,15 @@ function renderGraph(traceData) {
   const nodeTitleById = new Map();
   traceData.nodes.forEach((node) => {
     nodeTitleById.set(node.paper_id, node.title);
+    const incoming = incomingCountByNode.get(node.paper_id) || 0;
     elements.push({
       data: {
         id: node.paper_id,
-        label: `${node.title.slice(0, 56)}${node.title.length > 56 ? "..." : ""}\nL${node.level}`,
+        label: `${node.title.slice(0, 56)}${node.title.length > 56 ? "..." : ""}\nL${node.level} • In ${incoming}`,
         fullTitle: node.title,
         level: node.level,
+        incoming,
+        nodeColor: nodeColorFromIncoming(incoming),
       },
     });
   });
@@ -625,7 +751,7 @@ function renderGraph(traceData) {
       {
         selector: "node",
         style: {
-          "background-color": "#0f7b6c",
+          "background-color": "data(nodeColor)",
           "text-wrap": "wrap",
           "text-max-width": 130,
           color: "#10231b",
@@ -641,10 +767,10 @@ function renderGraph(traceData) {
       {
         selector: "node[level = 0]",
         style: {
-          "background-color": "#ff7a3e",
           width: 52,
           height: 52,
-          "border-color": "#ffe3d3",
+          "border-width": 4,
+          "border-color": "#ff7a3e",
         },
       },
       {
@@ -730,6 +856,14 @@ nextPageBtn.addEventListener("click", () => {
   executeSearch(currentPage + 1);
 });
 graphResetBtn.addEventListener("click", resetGraphView);
+visualizeFavoritesLinksBtn.addEventListener("click", openFavoritesGraphModal);
+favoritesGraphCancelBtn.addEventListener("click", closeFavoritesGraphModal);
+favoritesGraphOpenBtn.addEventListener("click", openFavoritesGraphPage);
+favoritesGraphModal.addEventListener("click", (evt) => {
+  if (evt.target === favoritesGraphModal) {
+    closeFavoritesGraphModal();
+  }
+});
 
 createConferenceChips();
 updateSearchModeUI();

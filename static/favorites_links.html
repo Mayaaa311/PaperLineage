@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Favorite Links Graph</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Space+Grotesk:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/style.css" />
+    <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+  </head>
+  <body>
+    <div class="noise-overlay"></div>
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Research Tracing Platform</p>
+        <h1>Favorites Link Visualization</h1>
+        <p class="subtext">Merged cached lineage traces with inferred related-paper links across selected favorites.</p>
+      </div>
+      <div class="section-actions">
+        <button id="back-home" class="ghost-btn" type="button">Back</button>
+        <button id="reload-links-graph" class="ghost-btn" type="button">Reload</button>
+        <button id="links-reset-view" class="ghost-btn" type="button">Reset View</button>
+      </div>
+    </header>
+
+    <main class="graph-page-layout">
+      <section class="panel graph-page-info">
+        <h2>4) Paper Detail</h2>
+        <p id="links-selection-meta" class="meta"></p>
+        <div id="fl-detail-empty" class="empty">Click a node in the graph to inspect paper details.</div>
+        <div id="fl-detail-content" class="hidden">
+          <h3 id="fl-detail-title"></h3>
+          <p id="fl-detail-meta" class="meta"></p>
+          <button id="fl-detail-read-btn" class="read-btn" type="button">Read Full Paper</button>
+          <p id="fl-detail-abstract"></p>
+          <p id="fl-detail-references" class="meta"></p>
+          <div class="analysis-block">
+            <h4>3-Point Quick Read</h4>
+            <ul id="fl-detail-insights" class="analysis-list"></ul>
+          </div>
+          <div class="analysis-block">
+            <h4>Paper Logic & Evidence</h4>
+            <p id="fl-detail-logic" class="analysis-text"></p>
+            <ul id="fl-detail-evidence" class="analysis-list"></ul>
+          </div>
+          <div class="analysis-block">
+            <h4>Limitations / Risks</h4>
+            <ul id="fl-detail-limitations" class="analysis-list"></ul>
+          </div>
+          <div class="analysis-block">
+            <h4>Most Relied-On Prior Papers</h4>
+            <ul id="fl-detail-key-deps" class="analysis-list"></ul>
+          </div>
+          <div class="analysis-block">
+            <h4>Datasets / Benchmarks Used</h4>
+            <ul id="fl-detail-dataset-deps" class="analysis-list"></ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel graph-page-main">
+        <h2>5) Combined Favorite Links Graph</h2>
+        <div class="graph-legend">
+          <span class="legend-item"><span class="legend-swatch high"></span>High relevance</span>
+          <span class="legend-item"><span class="legend-swatch medium"></span>Medium relevance</span>
+          <span class="legend-item"><span class="legend-swatch low"></span>Low relevance</span>
+          <span class="legend-note">Node color intensity = cited-by count (incoming edges).</span>
+          <span class="legend-note">Dotted blue edges are inferred related-topic links.</span>
+        </div>
+        <p id="fl-edge-explainer" class="meta edge-explainer">Click an edge to inspect how two papers are linked.</p>
+        <div id="fl-graph-empty" class="empty">Loading cached favorite links graph...</div>
+        <div id="favorites-links-graph"></div>
+      </section>
+    </main>
+
+    <script src="/static/favorites_links.js"></script>
+  </body>
+</html>

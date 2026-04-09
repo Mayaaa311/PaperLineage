@@ -156,3 +156,39 @@ class TraceStatusResponse(BaseModel):
     root_paper_id: str
     nodes: list[TraceNodeOut] = Field(default_factory=list)
     edges: list[TraceEdgeOut] = Field(default_factory=list)
+
+
+class TraceLatestResponse(BaseModel):
+    found: bool
+    trace: TraceStatusResponse | None = None
+
+
+class FavoritesLinksGraphRequest(BaseModel):
+    user_id: str = "demo-user"
+    paper_ids: list[str] = Field(default_factory=list)
+    max_related_edges: int = Field(default=36, ge=0, le=200)
+
+
+class FavoritesLinksNodeOut(BaseModel):
+    paper_id: str
+    title: str
+    venue: str | None = None
+    year: int | None = None
+    citation_count: int = 0
+    level: int = 0
+    is_selected_root: bool = False
+
+
+class FavoritesLinksEdgeOut(BaseModel):
+    source_paper_id: str
+    target_paper_id: str
+    relation_type: str
+    confidence: float
+    reason: str
+    inferred: bool = False
+
+
+class FavoritesLinksGraphResponse(BaseModel):
+    selected_paper_ids: list[str] = Field(default_factory=list)
+    nodes: list[FavoritesLinksNodeOut] = Field(default_factory=list)
+    edges: list[FavoritesLinksEdgeOut] = Field(default_factory=list)

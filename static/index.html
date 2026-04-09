@@ -81,7 +81,10 @@
       <section class="panel favorites-panel">
         <div class="section-header">
           <h2>3) Favorites</h2>
-          <button id="refresh-favorites" class="ghost-btn" type="button">Refresh</button>
+          <div class="section-actions">
+            <button id="visualize-favorites-links" class="ghost-btn" type="button">Visualize Links</button>
+            <button id="refresh-favorites" class="ghost-btn" type="button">Refresh</button>
+          </div>
         </div>
         <div id="favorites-list" class="paper-list empty">No saved papers yet.</div>
       </section>
@@ -144,6 +147,7 @@
             <span class="legend-swatch low"></span>
             Low relevance
           </span>
+          <span class="legend-note">Node color intensity = cited-by count (incoming edges).</span>
           <span class="legend-note">Click an edge to see why the papers are linked.</span>
         </div>
         <p id="edge-explainer" class="meta edge-explainer">Click an edge to inspect the paper link.</p>
@@ -164,6 +168,21 @@
         </div>
       </article>
     </template>
+
+    <div id="favorites-graph-modal" class="modal-backdrop hidden" aria-hidden="true">
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="favorites-graph-modal-title">
+        <h3 id="favorites-graph-modal-title">Select Favorite Papers</h3>
+        <p class="meta modal-meta">
+          Pick favorites to include in the combined lineage graph. Cached trace links will be merged, and related papers
+          may be connected.
+        </p>
+        <div id="favorites-graph-picker" class="modal-list"></div>
+        <div class="modal-actions">
+          <button id="favorites-graph-cancel" class="ghost-btn" type="button">Cancel</button>
+          <button id="favorites-graph-open" type="button">Open Visualization</button>
+        </div>
+      </div>
+    </div>
 
     <script src="/static/app.js"></script>
   </body>

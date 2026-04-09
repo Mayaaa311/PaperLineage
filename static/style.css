@@ -436,6 +436,106 @@ form button,
   opacity: 0.9;
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(17, 30, 24, 0.48);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  z-index: 50;
+}
+
+.modal-backdrop.hidden {
+  display: none !important;
+}
+
+.modal-card {
+  width: min(760px, 96vw);
+  max-height: 85vh;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(72, 101, 87, 0.24);
+  border-radius: 16px;
+  box-shadow: 0 20px 38px rgba(13, 31, 24, 0.24);
+  padding: 14px;
+}
+
+.modal-meta {
+  margin: 4px 0 10px;
+}
+
+.modal-list {
+  border: 1px solid rgba(72, 101, 87, 0.2);
+  background: rgba(249, 252, 249, 0.9);
+  border-radius: 12px;
+  padding: 10px;
+  max-height: 52vh;
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+}
+
+.modal-paper-item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  align-items: start;
+  border: 1px solid rgba(72, 101, 87, 0.14);
+  border-radius: 10px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.modal-paper-item input {
+  width: auto;
+  margin-top: 2px;
+}
+
+.modal-paper-title {
+  font-size: 13px;
+  color: #1f3329;
+  margin: 0 0 3px;
+}
+
+.modal-paper-meta {
+  margin: 0;
+  font-size: 11px;
+  color: #4f695b;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.graph-page-layout {
+  display: grid;
+  grid-template-columns: 4fr 8fr;
+  gap: 14px;
+}
+
+.graph-page-info {
+  display: grid;
+  gap: 12px;
+}
+
+.graph-page-main {
+  display: grid;
+  gap: 12px;
+}
+
+#favorites-links-graph {
+  display: block;
+  height: 74vh;
+  border: 1px solid rgba(72, 101, 87, 0.22);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
 @media (max-width: 1080px) {
   .search-panel,
   .results-panel,
@@ -447,5 +547,13 @@ form button,
 
   #graph {
     height: 470px;
+  }
+
+  .graph-page-layout {
+    grid-template-columns: 1fr;
+  }
+
+  #favorites-links-graph {
+    height: 62vh;
   }
 }

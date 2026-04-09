@@ -150,6 +150,39 @@ def _title_similarity(a: str | None, b: str | None) -> float:
     return SequenceMatcher(None, na, nb).ratio()
 
 
+def _tokenize_related_text(text: str | None) -> set[str]:
+    tokens = [x for x in re.split(r"[^a-z0-9]+", (text or "").lower()) if len(x) >= 4]
+    stop = {
+        "this",
+        "that",
+        "with",
+        "from",
+        "using",
+        "learning",
+        "model",
+        "models",
+        "method",
+        "methods",
+        "paper",
+        "approach",
+        "results",
+    }
+    return {x for x in tokens if x not in stop}
+
+
+def _relatedness_score(a: Paper, b: Paper) -> float:
+    title_sim = _title_similarity(a.title, b.title)
+    a_tokens = _tokenize_related_text(f"{a.title or ''} {a.abstract or ''}")
+    b_tokens = _tokenize_related_text(f"{b.title or ''} {b.abstract or ''}")
+    overlap = len(a_tokens & b_tokens) / max(1, len(a_tokens | b_tokens))
+    citation_bonus = min(((a.citation_count or 0) + (b.citation_count or 0)) / 2000.0, 0.08)
+    return max(0.0, min(1.0, title_sim * 0.62 + overlap * 0.34 + citation_bonus))
+
+
+def _pair_key(a: str, b: str) -> tuple[str, str]:
+    return (a, b) if a < b else (b, a)
+
+
 def enrich_missing_citations(
     db: Session,
     papers: list[Paper],
@@ -293,6 +326,11 @@ def save_search_snapshot(
 @app.get("/")
 def root() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/favorites-links")
+def favorites_links_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "favorites_links.html")
 
 
 @app.post("/api/papers/search", response_model=schemas.PaperSearchResponse)
@@ -482,6 +520,7 @@ def search_papers(payload: schemas.PaperSearchRequest, db: Session = Depends(get
 def get_paper_detail(
     paper_id: str,
     user_id: str = Query(default="demo-user"),
+    prefer_cached: bool = Query(default=False),
     db: Session = Depends(get_db),
 ):
     paper = db.execute(select(Paper).where(Paper.id == paper_id)).scalar_one_or_none()
@@ -495,13 +534,43 @@ def get_paper_detail(
     detail_cache = db.execute(
         select(PaperDetailCache).where(PaperDetailCache.paper_id == paper.id)
     ).scalar_one_or_none()
+    analysis_cache = db.execute(
+        select(PaperAnalysis).where(PaperAnalysis.paper_id == paper.id)
+    ).scalar_one_or_none()
     if detail_cache:
         references_count = detail_cache.references_count or 0
         cached_preview = load_json_list(detail_cache.references_preview_json)
         references_preview = [x for x in cached_preview if isinstance(x, dict)][:10]
+        preview_ids = [str(x.get("id")) for x in references_preview if x.get("id")]
+        if preview_ids:
+            ref_rows = db.execute(select(Paper).where(Paper.id.in_(preview_ids))).scalars().all()
+            ref_map = {x.id: x for x in ref_rows}
+            for pid in preview_ids:
+                row = ref_map.get(pid)
+                if not row:
+                    continue
+                reference_candidates.append(
+                    {
+                        "id": row.id,
+                        "title": row.title,
+                        "year": row.year,
+                        "venue": row.venue,
+                        "citation_count": row.citation_count,
+                        "url": row.url,
+                        "abstract": row.abstract,
+                    }
+                )
 
     # Enrich scraped entries with canonical metadata before analysis/ref traversal.
-    if (not paper.abstract or not paper.external_id or str(paper.external_id).startswith("SCRAPE:")) and not detail_cache:
+    cache_miss_for_detail = detail_cache is None
+    cache_miss_for_analysis = analysis_cache is None
+    should_warm_cache = prefer_cached and (cache_miss_for_detail or cache_miss_for_analysis)
+
+    if (
+        (not paper.abstract or not paper.external_id or str(paper.external_id).startswith("SCRAPE:"))
+        and not detail_cache
+        and (not prefer_cached or should_warm_cache)
+    ):
         scholar = ScholarClient()
         try:
             candidates = scholar.search_papers(query=paper.title, limit=8)
@@ -555,7 +624,7 @@ def get_paper_detail(
             pass
 
     # Only fetch external references once; subsequent detail opens reuse cached detail data.
-    if external_lookup_id and not detail_cache:
+    if external_lookup_id and not detail_cache and (not prefer_cached or should_warm_cache):
         scholar = ScholarClient()
         try:
             payload = scholar.get_paper(external_lookup_id)
@@ -607,7 +676,12 @@ def get_paper_detail(
         ).scalar_one_or_none()
         is not None
     )
-    analysis = get_or_create_paper_analysis(db, paper, reference_candidates)
+    analysis = get_or_create_paper_analysis(
+        db,
+        paper,
+        reference_candidates,
+        cache_only=prefer_cached and not should_warm_cache,
+    )
 
     return {
         "id": paper.id,
@@ -632,6 +706,103 @@ def get_paper_detail(
         "analysis_model": analysis.get("model_name"),
         "key_dependencies": analysis.get("key_dependencies", []),
         "dataset_dependencies": analysis.get("dataset_dependencies", []),
+    }
+
+
+def _serialize_trace(
+    db: Session,
+    trace_req: TraceRequest,
+    refresh_edge_reasons: bool = True,
+) -> dict:
+    nodes_out: list[dict] = []
+    edges_out: list[dict] = []
+
+    if trace_req.status in {"running", "completed"}:
+        node_rows = db.execute(
+            select(TraceGraphNode, Paper)
+            .join(Paper, Paper.id == TraceGraphNode.paper_id)
+            .where(TraceGraphNode.trace_request_id == trace_req.id)
+            .order_by(TraceGraphNode.level.asc(), Paper.citation_count.desc())
+        ).all()
+        for node, paper in node_rows:
+            nodes_out.append(
+                {
+                    "paper_id": node.paper_id,
+                    "level": node.level,
+                    "title": paper.title,
+                    "venue": paper.venue,
+                    "year": paper.year,
+                    "citation_count": paper.citation_count,
+                }
+            )
+        paper_lookup = {paper.id: paper for _, paper in node_rows}
+
+        edge_rows = list(
+            db.execute(
+                select(TraceGraphEdge).where(TraceGraphEdge.trace_request_id == trace_req.id)
+            ).scalars()
+        )
+        updated_edge_reason = False
+        stale_reason_patterns = (
+            "Likely direct technical dependency",
+            "Likely foundational method paper",
+            "Inferred from title similarity and citation influence when explicit references were unavailable.",
+            "High-citation method-related reference based on title signals.",
+        )
+        for edge_obj in edge_rows:
+            reason = edge_obj.reason or ""
+            if not isinstance(reason, str):
+                reason = ""
+            should_refresh = refresh_edge_reasons and (
+                not reason or any(p in reason for p in stale_reason_patterns)
+            )
+            if should_refresh:
+                source_paper = paper_lookup.get(edge_obj.source_paper_id)
+                target_paper = paper_lookup.get(edge_obj.target_paper_id)
+                if source_paper and target_paper:
+                    refreshed = explain_trace_edge(
+                        source_paper={
+                            "title": source_paper.title,
+                            "abstract": source_paper.abstract,
+                            "venue": source_paper.venue,
+                            "year": source_paper.year,
+                        },
+                        target_paper={
+                            "title": target_paper.title,
+                            "abstract": target_paper.abstract,
+                            "venue": target_paper.venue,
+                            "year": target_paper.year,
+                        },
+                        relation_type=edge_obj.relation_type,
+                        base_reason=reason,
+                    )
+                    if refreshed and refreshed != reason:
+                        edge_obj.reason = refreshed
+                        reason = refreshed
+                        updated_edge_reason = True
+
+            edges_out.append(
+                {
+                    "source_paper_id": edge_obj.source_paper_id,
+                    "target_paper_id": edge_obj.target_paper_id,
+                    "relation_type": edge_obj.relation_type,
+                    "confidence": edge_obj.confidence,
+                    "reason": reason,
+                }
+            )
+        if updated_edge_reason:
+            db.commit()
+
+    return {
+        "trace_id": trace_req.id,
+        "status": trace_req.status,
+        "trace_depth": trace_req.trace_depth,
+        "created_at": trace_req.created_at,
+        "completed_at": trace_req.completed_at,
+        "error_message": trace_req.error_message,
+        "root_paper_id": trace_req.root_paper_id,
+        "nodes": nodes_out,
+        "edges": edges_out,
     }
 
 
@@ -722,6 +893,198 @@ def list_favorites(user_id: str = Query(default="demo-user"), db: Session = Depe
     }
 
 
+@app.post("/api/favorites/links-graph", response_model=schemas.FavoritesLinksGraphResponse)
+def favorites_links_graph(payload: schemas.FavoritesLinksGraphRequest, db: Session = Depends(get_db)):
+    requested = [str(x).strip() for x in payload.paper_ids if str(x).strip()]
+    if not requested:
+        raise HTTPException(status_code=400, detail="Select at least one favorite paper.")
+
+    favorite_ids = set(
+        db.execute(
+            select(Favorite.paper_id).where(Favorite.user_id == payload.user_id)
+        ).scalars()
+    )
+    selected_ids = [pid for pid in requested if pid in favorite_ids]
+    if not selected_ids:
+        raise HTTPException(status_code=400, detail="None of the selected papers are in favorites.")
+
+    trace_rows = db.execute(
+        select(TraceRequest)
+        .where(
+            TraceRequest.user_id == payload.user_id,
+            TraceRequest.root_paper_id.in_(selected_ids),
+            TraceRequest.status == "completed",
+        )
+        .order_by(TraceRequest.root_paper_id.asc(), TraceRequest.created_at.desc())
+    ).scalars().all()
+    latest_by_root: dict[str, TraceRequest] = {}
+    for tr in trace_rows:
+        if tr.root_paper_id not in latest_by_root:
+            latest_by_root[tr.root_paper_id] = tr
+    trace_ids = [x.id for x in latest_by_root.values()]
+
+    node_map: dict[str, dict] = {}
+    paper_map: dict[str, Paper] = {}
+
+    if trace_ids:
+        node_rows = db.execute(
+            select(TraceGraphNode, Paper)
+            .join(Paper, Paper.id == TraceGraphNode.paper_id)
+            .where(TraceGraphNode.trace_request_id.in_(trace_ids))
+        ).all()
+        for node, paper in node_rows:
+            paper_map[paper.id] = paper
+            existing = node_map.get(node.paper_id)
+            if existing:
+                existing["level"] = min(existing["level"], int(node.level or 0))
+                if node.paper_id in selected_ids:
+                    existing["is_selected_root"] = True
+                continue
+            node_map[node.paper_id] = {
+                "paper_id": paper.id,
+                "title": paper.title,
+                "venue": paper.venue,
+                "year": paper.year,
+                "citation_count": paper.citation_count or 0,
+                "level": int(node.level or 0),
+                "is_selected_root": paper.id in selected_ids,
+            }
+
+    selected_rows = db.execute(select(Paper).where(Paper.id.in_(selected_ids))).scalars().all()
+    for paper in selected_rows:
+        paper_map[paper.id] = paper
+        if paper.id not in node_map:
+            node_map[paper.id] = {
+                "paper_id": paper.id,
+                "title": paper.title,
+                "venue": paper.venue,
+                "year": paper.year,
+                "citation_count": paper.citation_count or 0,
+                "level": 0,
+                "is_selected_root": True,
+            }
+        else:
+            node_map[paper.id]["is_selected_root"] = True
+            node_map[paper.id]["level"] = min(node_map[paper.id]["level"], 0)
+
+    edges_out: list[dict] = []
+    existing_pairs: set[tuple[str, str]] = set()
+    seen_directed: set[tuple[str, str, str]] = set()
+
+    if trace_ids:
+        edge_rows = db.execute(
+            select(TraceGraphEdge).where(TraceGraphEdge.trace_request_id.in_(trace_ids))
+        ).scalars().all()
+        missing_ids: set[str] = set()
+        for edge in edge_rows:
+            s = edge.source_paper_id
+            t = edge.target_paper_id
+            if s not in node_map:
+                missing_ids.add(s)
+            if t not in node_map:
+                missing_ids.add(t)
+        if missing_ids:
+            missing_rows = db.execute(select(Paper).where(Paper.id.in_(list(missing_ids)))).scalars().all()
+            for paper in missing_rows:
+                paper_map[paper.id] = paper
+                node_map[paper.id] = {
+                    "paper_id": paper.id,
+                    "title": paper.title,
+                    "venue": paper.venue,
+                    "year": paper.year,
+                    "citation_count": paper.citation_count or 0,
+                    "level": 1,
+                    "is_selected_root": paper.id in selected_ids,
+                }
+
+        for edge in edge_rows:
+            key = (edge.source_paper_id, edge.target_paper_id, edge.relation_type)
+            if key in seen_directed:
+                continue
+            seen_directed.add(key)
+            existing_pairs.add(_pair_key(edge.source_paper_id, edge.target_paper_id))
+            edges_out.append(
+                {
+                    "source_paper_id": edge.source_paper_id,
+                    "target_paper_id": edge.target_paper_id,
+                    "relation_type": edge.relation_type,
+                    "confidence": edge.confidence,
+                    "reason": edge.reason or "Cached trace linkage.",
+                    "inferred": False,
+                }
+            )
+
+    candidate_ids = sorted(
+        node_map.keys(),
+        key=lambda pid: (
+            0 if node_map[pid]["is_selected_root"] else 1,
+            node_map[pid]["level"],
+            -(node_map[pid]["citation_count"] or 0),
+        ),
+    )[:180]
+    related_candidates: list[dict] = []
+    for i in range(len(candidate_ids)):
+        a_id = candidate_ids[i]
+        a_paper = paper_map.get(a_id)
+        if not a_paper:
+            continue
+        for j in range(i + 1, len(candidate_ids)):
+            b_id = candidate_ids[j]
+            pair = _pair_key(a_id, b_id)
+            if pair in existing_pairs:
+                continue
+            b_paper = paper_map.get(b_id)
+            if not b_paper:
+                continue
+            score = _relatedness_score(a_paper, b_paper)
+            one_root = node_map[a_id]["is_selected_root"] or node_map[b_id]["is_selected_root"]
+            threshold = 0.58 if one_root else 0.69
+            if score < threshold:
+                continue
+            if (
+                isinstance(a_paper.year, int)
+                and isinstance(b_paper.year, int)
+                and a_paper.year != b_paper.year
+            ):
+                source_id, target_id = (a_id, b_id) if a_paper.year >= b_paper.year else (b_id, a_id)
+            else:
+                source_id, target_id = (a_id, b_id) if a_id <= b_id else (b_id, a_id)
+            related_candidates.append(
+                {
+                    "source_paper_id": source_id,
+                    "target_paper_id": target_id,
+                    "relation_type": "related_topic",
+                    "confidence": score,
+                    "reason": "Inferred thematic/method overlap from stored title and abstract signals.",
+                    "inferred": True,
+                }
+            )
+
+    related_candidates.sort(key=lambda x: x["confidence"], reverse=True)
+    for edge in related_candidates[: payload.max_related_edges]:
+        pair = _pair_key(edge["source_paper_id"], edge["target_paper_id"])
+        if pair in existing_pairs:
+            continue
+        existing_pairs.add(pair)
+        edges_out.append(edge)
+
+    nodes_out = sorted(
+        list(node_map.values()),
+        key=lambda x: (
+            0 if x["is_selected_root"] else 1,
+            x["level"],
+            -(x["citation_count"] or 0),
+            x["title"].lower(),
+        ),
+    )
+
+    return {
+        "selected_paper_ids": selected_ids,
+        "nodes": nodes_out,
+        "edges": edges_out,
+    }
+
+
 @app.post("/api/traces", response_model=schemas.TraceStartResponse)
 def start_trace(
     payload: schemas.TraceStartRequest,
@@ -802,96 +1165,37 @@ def start_trace(
 
 
 @app.get("/api/traces/{trace_id}", response_model=schemas.TraceStatusResponse)
-def get_trace(trace_id: int, db: Session = Depends(get_db)):
+def get_trace(
+    trace_id: int,
+    refresh_edge_reasons: bool = Query(default=True),
+    db: Session = Depends(get_db),
+):
     trace_req = db.execute(select(TraceRequest).where(TraceRequest.id == trace_id)).scalar_one_or_none()
     if not trace_req:
         raise HTTPException(status_code=404, detail="Trace request not found.")
+    return _serialize_trace(db, trace_req, refresh_edge_reasons=refresh_edge_reasons)
 
-    nodes_out: list[dict] = []
-    edges_out: list[dict] = []
 
-    if trace_req.status in {"running", "completed"}:
-        node_rows = db.execute(
-            select(TraceGraphNode, Paper)
-            .join(Paper, Paper.id == TraceGraphNode.paper_id)
-            .where(TraceGraphNode.trace_request_id == trace_id)
-            .order_by(TraceGraphNode.level.asc(), Paper.citation_count.desc())
-        ).all()
-        for node, paper in node_rows:
-            nodes_out.append(
-                {
-                    "paper_id": node.paper_id,
-                    "level": node.level,
-                    "title": paper.title,
-                    "venue": paper.venue,
-                    "year": paper.year,
-                    "citation_count": paper.citation_count,
-                }
+@app.get("/api/traces/by-paper/latest", response_model=schemas.TraceLatestResponse)
+def get_latest_cached_trace(
+    paper_id: str,
+    user_id: str = Query(default="demo-user"),
+    db: Session = Depends(get_db),
+):
+    trace_req = (
+        db.execute(
+            select(TraceRequest)
+            .where(
+                TraceRequest.user_id == user_id,
+                TraceRequest.root_paper_id == paper_id,
+                TraceRequest.status == "completed",
             )
-        paper_lookup = {paper.id: paper for _, paper in node_rows}
-
-        edge_rows = list(
-            db.execute(
-                select(TraceGraphEdge).where(TraceGraphEdge.trace_request_id == trace_id)
-            ).scalars()
+            .order_by(TraceRequest.created_at.desc())
         )
-        updated_edge_reason = False
-        stale_reason_patterns = (
-            "Likely direct technical dependency",
-            "Likely foundational method paper",
-            "Inferred from title similarity and citation influence when explicit references were unavailable.",
-            "High-citation method-related reference based on title signals.",
-        )
-        for edge_obj in edge_rows:
-            reason = edge_obj.reason or ""
-            if not isinstance(reason, str):
-                reason = ""
-            should_refresh = not reason or any(p in reason for p in stale_reason_patterns)
-            if should_refresh:
-                source_paper = paper_lookup.get(edge_obj.source_paper_id)
-                target_paper = paper_lookup.get(edge_obj.target_paper_id)
-                if source_paper and target_paper:
-                    refreshed = explain_trace_edge(
-                        source_paper={
-                            "title": source_paper.title,
-                            "abstract": source_paper.abstract,
-                            "venue": source_paper.venue,
-                            "year": source_paper.year,
-                        },
-                        target_paper={
-                            "title": target_paper.title,
-                            "abstract": target_paper.abstract,
-                            "venue": target_paper.venue,
-                            "year": target_paper.year,
-                        },
-                        relation_type=edge_obj.relation_type,
-                        base_reason=reason,
-                    )
-                    if refreshed and refreshed != reason:
-                        edge_obj.reason = refreshed
-                        reason = refreshed
-                        updated_edge_reason = True
-
-            edges_out.append(
-                {
-                    "source_paper_id": edge_obj.source_paper_id,
-                    "target_paper_id": edge_obj.target_paper_id,
-                    "relation_type": edge_obj.relation_type,
-                    "confidence": edge_obj.confidence,
-                    "reason": reason,
-                }
-            )
-        if updated_edge_reason:
-            db.commit()
-
-    return {
-        "trace_id": trace_req.id,
-        "status": trace_req.status,
-        "trace_depth": trace_req.trace_depth,
-        "created_at": trace_req.created_at,
-        "completed_at": trace_req.completed_at,
-        "error_message": trace_req.error_message,
-        "root_paper_id": trace_req.root_paper_id,
-        "nodes": nodes_out,
-        "edges": edges_out,
-    }
+        .scalars()
+        .first()
+    )
+    if not trace_req:
+        return {"found": False, "trace": None}
+    trace_payload = _serialize_trace(db, trace_req, refresh_edge_reasons=False)
+    return {"found": True, "trace": trace_payload}

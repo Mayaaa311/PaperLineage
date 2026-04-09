@@ -31,6 +31,14 @@ GENERIC_EVIDENCE_PATTERNS = (
     "ablation studies isolate important components and show contribution of each part",
 )
 
+STALE_LIMITATION_PATTERNS = (
+    "inferred from abstract",
+    "evidence in the abstract",
+    "abstract may not cover",
+    "check discussion/appendix",
+    "check discussion",
+)
+
 TOKEN_STOPWORDS = {
     "the",
     "and",
@@ -76,6 +84,55 @@ def _to_payload(entry: PaperAnalysis) -> dict:
         "dataset_dependencies": load_json_list(entry.dataset_dependencies_json),
         "model_name": entry.model_name,
     }
+
+
+def _coerce_cached_dependencies(
+    db: Session,
+    raw_items: list[dict],
+    default_role: str,
+) -> list[dict]:
+    ids: list[str] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        dep_id = str(item.get("id") or item.get("ref_id") or "").strip()
+        if dep_id:
+            ids.append(dep_id)
+    id_to_paper: dict[str, Paper] = {}
+    if ids:
+        rows = db.execute(select(Paper).where(Paper.id.in_(ids))).scalars().all()
+        id_to_paper = {x.id: x for x in rows}
+
+    out: list[dict] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        dep_id = str(item.get("id") or item.get("ref_id") or "").strip()
+        if not dep_id:
+            continue
+        row = id_to_paper.get(dep_id)
+        title = str(item.get("title") or "").strip() or (row.title if row else "")
+        if not title:
+            title = f"Reference {dep_id[:8]}"
+        out.append(
+            {
+                "id": dep_id,
+                "title": title,
+                "year": item.get("year") if item.get("year") is not None else (row.year if row else None),
+                "venue": item.get("venue") if item.get("venue") is not None else (row.venue if row else None),
+                "citation_count": int(
+                    item.get("citation_count")
+                    if item.get("citation_count") is not None
+                    else (row.citation_count if row else 0)
+                    or 0
+                ),
+                "url": item.get("url") or (row.url if row else None),
+                "role": str(item.get("role") or default_role),
+                "confidence": _safe_float(item.get("confidence"), 0.6),
+                "reason": str(item.get("reason") or "").strip() or "Cached dependency.",
+            }
+        )
+    return out
 
 
 def _safe_float(value, default: float = 0.0) -> float:
@@ -211,6 +268,8 @@ def _is_generic_analysis_payload(payload: dict) -> bool:
     if evidence and not any(e.startswith("[section:") for e in evidence):
         return True
     if not limitations:
+        return True
+    if any(any(pat in x.lower() for pat in STALE_LIMITATION_PATTERNS) for x in limitations):
         return True
     return False
 
@@ -921,10 +980,37 @@ def get_or_create_paper_analysis(
     db: Session,
     paper: Paper,
     reference_candidates: list[dict],
+    cache_only: bool = False,
 ) -> dict:
     existing = db.execute(select(PaperAnalysis).where(PaperAnalysis.paper_id == paper.id)).scalar_one_or_none()
     if existing:
         payload = _to_payload(existing)
+        if cache_only:
+            if not reference_candidates:
+                payload["key_dependencies"] = _coerce_cached_dependencies(
+                    db,
+                    payload.get("key_dependencies") or [],
+                    "direct_technical_dependency",
+                )
+                payload["dataset_dependencies"] = _coerce_cached_dependencies(
+                    db,
+                    payload.get("dataset_dependencies") or [],
+                    "dataset_or_benchmark",
+                )
+                return payload
+            resolved = _resolve_dependencies(
+                reference_candidates, payload["key_dependencies"], "direct_technical_dependency"
+            )
+            resolved_dataset = _resolve_dependencies(
+                reference_candidates, payload["dataset_dependencies"], "dataset_or_benchmark"
+            )
+            resolved = _filter_self_dependencies(paper, resolved)
+            resolved_dataset = _filter_self_dependencies(paper, resolved_dataset)
+            resolved = _hydrate_dependency_urls(db, resolved)
+            resolved_dataset = _hydrate_dependency_urls(db, resolved_dataset)
+            payload["key_dependencies"] = resolved
+            payload["dataset_dependencies"] = resolved_dataset
+            return payload
         if payload["quick_takeaways"] and payload["logic_summary"] and not _is_generic_analysis_payload(payload):
             resolved = _resolve_dependencies(
                 reference_candidates, payload["key_dependencies"], "direct_technical_dependency"
@@ -973,6 +1059,9 @@ def get_or_create_paper_analysis(
             payload["dataset_dependencies"] = resolved_dataset
             return payload
 
+    if cache_only:
+        return _empty_analysis()
+
     generated = generate_paper_analysis(
         {
             "title": paper.title,
@@ -980,6 +1069,8 @@ def get_or_create_paper_analysis(
             "venue": paper.venue,
             "year": paper.year,
             "citation_count": paper.citation_count,
+            "url": paper.url,
+            "external_id": paper.external_id,
         },
         reference_candidates,
     )
