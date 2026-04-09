@@ -21,18 +21,18 @@ Paper Explorer helps you move from **search** to **understanding** to **lineage 
 
 ---
 
-## Product Flow (Visual)
+## Webapp Flow (Visual)
 
 ```mermaid
 flowchart LR
-  A[1. Search Setup\nTopic or Paper Name\nConference + Years] --> B[2. Paper Discovery\nRanked by citation count]
-  B --> C[3. Favorites\nPersist selected papers]
-  B --> D[4. Paper Detail\nSummary + dependencies]
+  A["1) Search Setup<br/>Topic or Paper Name<br/>Conference + Years"] --> B["2) Paper Discovery<br/>Ranked by citation count"]
+  B --> C["3) Favorites<br/>Persist selected papers"]
+  B --> D["4) Paper Detail<br/>Summary + dependencies"]
   C --> D
-  D --> E[5. Trace-Back\nRecursive lineage graph]
-  C --> F[Visualize Links Button]
-  F --> G[Select favorite papers]
-  G --> H[/favorites-links page\nMerged graph + detail panel]
+  D --> E["5) Trace-Back<br/>Recursive lineage graph"]
+  C --> F["Visualize Links Button"]
+  F --> G["Select favorite papers"]
+  G --> H["/favorites-links page<br/>Merged graph + detail panel"]
   H --> D
 ```
 
@@ -42,18 +42,18 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-  subgraph Main Page [/]
-    S[Search Setup]
-    R[Paper Discovery]
-    V[Favorites]
-    P[Paper Detail]
-    G[Method Lineage Graph]
+  subgraph MainPage["Main Page (/)"]
+    S["Search Setup"]
+    R["Paper Discovery"]
+    V["Favorites"]
+    P["Paper Detail"]
+    G["Method Lineage Graph"]
   end
 
-  subgraph Favorites Links Page [/favorites-links]
-    F1[Selected Favorites Meta]
-    F2[Paper Detail Panel]
-    F3[Combined Favorite Links Graph]
+  subgraph LinksPage["Favorites Links Page (/favorites-links)"]
+    F1["Selected Favorites Meta"]
+    F2["Paper Detail Panel"]
+    F3["Combined Favorite Links Graph"]
   end
 
   V -->|Visualize Links| F1
@@ -68,19 +68,19 @@ flowchart TB
 
 ```mermaid
 flowchart TD
-  Q[Search Request] --> M{search_mode}
-  M -->|topic| T1[Scrape official conference websites]
-  M -->|paper_name| P1[Query Semantic Scholar + OpenAlex]
+  Q["Search Request"] --> M{"search_mode"}
+  M -->|topic| T1["Scrape official conference websites"]
+  M -->|paper_name| P1["Query Semantic Scholar + OpenAlex"]
 
-  T1 --> T2[Local DB fallback]
-  P1 --> P2[Strict local filters\n(title/year/conference)]
+  T1 --> T2["Local DB fallback"]
+  P1 --> P2["Strict local filters<br/>(title, year, conference)"]
   P2 --> P3{Any results?}
-  P3 -->|No| P4[Conference scrape fallback]
+  P3 -->|No| P4["Conference scrape fallback"]
   P3 -->|Yes| R
   P4 --> R
   T2 --> R
 
-  R[Deduplicate + enrich citations\n+ rank by citations] --> C[Auto-save search snapshot for pagination cache]
+  R["Deduplicate + enrich citations + rank by citations"] --> C["Auto-save search snapshot for pagination cache"]
 ```
 
 What you get:
@@ -91,14 +91,14 @@ What you get:
 
 ```mermaid
 flowchart TD
-  O[Open paper detail] --> C{prefer_cached?}
-  C -->|true| A1[Read cached detail + cached analysis]
-  C -->|false| A2[Enrich from external providers if needed]
-  A2 --> A3[Cache references preview]
-  A1 --> A4[Return structured detail payload]
+  O["Open paper detail"] --> C{"prefer_cached?"}
+  C -->|true| A1["Read cached detail + cached analysis"]
+  C -->|false| A2["Enrich from external providers if needed"]
+  A2 --> A3["Cache references preview"]
+  A1 --> A4["Return structured detail payload"]
   A3 --> A4
 
-  A4 --> U[UI panels:\nquick read, logic/evidence, limitations, key deps, datasets]
+  A4 --> U["UI panels: quick read, logic/evidence, limitations, key deps, datasets"]
 ```
 
 Analysis behavior:
@@ -110,14 +110,14 @@ Analysis behavior:
 
 ```mermaid
 flowchart TD
-  T[Start trace request] --> E{Existing completed trace\nfor same root+depth?}
-  E -->|Yes and valid| R1[Return cached trace]
-  E -->|No / stale| B[Background trace job]
+  T["Start trace request"] --> E{"Existing completed trace for same root+depth?"}
+  E -->|Yes and valid| R1["Return cached trace"]
+  E -->|No / stale| B["Background trace job"]
 
-  B --> W[Walk references recursively\nup to trace_depth]
-  W --> K[Select top method dependencies]
-  K --> G[Persist trace nodes + edges]
-  G --> R2[Trace status API returns graph]
+  B --> W["Walk references recursively up to trace_depth"]
+  W --> K["Select top method dependencies"]
+  K --> G["Persist trace nodes + edges"]
+  G --> R2["Trace status API returns graph"]
 ```
 
 Graph semantics:
@@ -130,13 +130,13 @@ Graph semantics:
 
 ```mermaid
 flowchart TD
-  F[Click Visualize Links] --> S[Select favorite papers]
-  S --> X[/favorites-links]
-  X --> A[Fetch latest completed traces for selected roots]
-  A --> M[Merge all nodes + edges]
-  M --> L[Add inferred related-topic links when similarity is high]
-  L --> U[Render combined graph]
-  U --> D[Node click opens detail panel on same page]
+  F["Click Visualize Links"] --> S["Select favorite papers"]
+  S --> X["/favorites-links page"]
+  X --> A["Fetch latest completed traces for selected roots"]
+  A --> M["Merge all nodes + edges"]
+  M --> L["Add inferred related-topic links when similarity is high"]
+  L --> U["Render combined graph"]
+  U --> D["Node click opens detail panel on same page"]
 ```
 
 Important behavior:
@@ -150,30 +150,30 @@ Important behavior:
 ```mermaid
 flowchart LR
   subgraph Frontend
-    UI1[static/index.html + app.js]
-    UI2[static/favorites_links.html + favorites_links.js]
-    CY[Cytoscape.js]
+    UI1["static/index.html + app.js"]
+    UI2["static/favorites_links.html + favorites_links.js"]
+    CY["Cytoscape.js"]
   end
 
-  subgraph Backend[FastAPI]
-    API[app/main.py routes]
-    TRACE[app/trace.py]
-    ANALYSIS[app/paper_analysis.py + app/llm.py]
-    SCRAPE[app/conference_scraper.py]
-    SCHOLAR[app/scholar.py]
+  subgraph Backend["FastAPI"]
+    API["app/main.py routes"]
+    TRACE["app/trace.py"]
+    ANALYSIS["app/paper_analysis.py + app/llm.py"]
+    SCRAPE["app/conference_scraper.py"]
+    SCHOLAR["app/scholar.py"]
   end
 
   subgraph Data
-    DB[(SQLite / SQLAlchemy)]
+    DB["SQLite / SQLAlchemy"]
     LLMDB[(llm_cache.db)]
   end
 
   subgraph External
-    OA[OpenAlex]
-    S2[Semantic Scholar]
-    CONF[Conference websites]
-    OR[OpenReview metadata]
-    GPT[OpenAI API]
+    OA["OpenAlex"]
+    S2["Semantic Scholar"]
+    CONF["Conference websites"]
+    OR["OpenReview metadata"]
+    GPT["OpenAI API"]
   end
 
   UI1 --> API
@@ -202,11 +202,11 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-  A[Search] --> S1[SavedSearch + SavedSearchPaper]
-  B[Paper detail references] --> S2[PaperDetailCache]
-  C[Paper structured analysis] --> S3[PaperAnalysis]
-  D[Trace graph] --> S4[TraceRequest + TraceGraphNode + TraceGraphEdge]
-  E[LLM prompt/response JSON] --> S5[llm_cache.db]
+  A["Search"] --> S1["SavedSearch + SavedSearchPaper"]
+  B["Paper detail references"] --> S2["PaperDetailCache"]
+  C["Paper structured analysis"] --> S3["PaperAnalysis"]
+  D["Trace graph"] --> S4["TraceRequest + TraceGraphNode + TraceGraphEdge"]
+  E["LLM prompt/response JSON"] --> S5["llm_cache.db"]
 ```
 
 Practical impact:
