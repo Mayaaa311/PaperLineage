@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Paper Explorer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Space+Grotesk:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/style.css" />
+    <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+  </head>
+  <body>
+    <div class="noise-overlay"></div>
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Research Tracing Platform</p>
+        <h1>Paper Explorer</h1>
+        <p class="subtext">
+          Search by topic + conference + years, save favorites, and recursively trace method ancestry.
+        </p>
+      </div>
+      <div class="pill">MVP</div>
+    </header>
+
+    <main class="layout">
+      <section class="panel search-panel">
+        <h2>1) Search Setup</h2>
+        <form id="search-form">
+          <label>Search mode
+            <select id="search-mode">
+              <option value="topic" selected>Topic</option>
+              <option value="paper_name">Paper Name</option>
+            </select>
+          </label>
+          <label id="query-label"><span id="query-label-text">Topic</span>
+            <input id="query-text" type="text" placeholder="e.g. diffusion model controllability" required />
+          </label>
+          <div class="conf-group">
+            <span>Conferences</span>
+            <label class="conf-all">
+              <input id="all-conferences" type="checkbox" />
+              All conferences (no filter)
+            </label>
+            <div id="conference-options" class="conf-options"></div>
+          </div>
+          <div class="year-row">
+            <label>Start year
+              <input id="start-year" type="number" min="1990" max="2030" value="2022" />
+            </label>
+            <label>End year
+              <input id="end-year" type="number" min="1990" max="2030" value="2026" />
+            </label>
+          </div>
+          <label>Max result pool
+            <input id="limit" type="number" min="10" max="300" value="300" />
+          </label>
+          <button type="submit">Search Papers</button>
+        </form>
+      </section>
+
+      <section class="panel results-panel">
+        <div class="section-header">
+          <h2>2) Paper Discovery</h2>
+          <div class="section-actions">
+            <button id="save-search" class="ghost-btn" type="button">Save Search</button>
+            <span id="results-meta" class="meta"></span>
+          </div>
+        </div>
+        <div class="pagination-bar">
+          <button id="prev-page" class="ghost-btn" type="button">Prev</button>
+          <span id="page-indicator" class="meta">Page 1 / 1</span>
+          <button id="next-page" class="ghost-btn" type="button">Next</button>
+        </div>
+        <div id="results-list" class="paper-list empty">Run a search to load papers.</div>
+      </section>
+
+      <section class="panel favorites-panel">
+        <div class="section-header">
+          <h2>3) Favorites</h2>
+          <button id="refresh-favorites" class="ghost-btn" type="button">Refresh</button>
+        </div>
+        <div id="favorites-list" class="paper-list empty">No saved papers yet.</div>
+      </section>
+
+      <section class="panel detail-panel">
+        <h2>4) Paper Detail + Trace-Back</h2>
+        <div id="detail-empty" class="empty">Select a paper to open details.</div>
+        <div id="detail-content" class="hidden">
+          <h3 id="detail-title"></h3>
+          <p id="detail-meta" class="meta"></p>
+          <button id="detail-read-btn" class="read-btn" type="button">Read Full Paper</button>
+          <p id="detail-abstract"></p>
+          <p id="detail-references" class="meta"></p>
+          <div class="analysis-block">
+            <h4>3-Point Quick Read</h4>
+            <ul id="detail-insights" class="analysis-list"></ul>
+          </div>
+          <div class="analysis-block">
+            <h4>Paper Logic & Evidence</h4>
+            <p id="detail-logic" class="analysis-text"></p>
+            <ul id="detail-evidence" class="analysis-list"></ul>
+          </div>
+          <div class="analysis-block">
+            <h4>Most Relied-On Prior Papers</h4>
+            <ul id="detail-key-deps" class="analysis-list"></ul>
+          </div>
+          <div class="trace-controls">
+            <label>Trace depth
+              <input id="trace-depth" type="number" min="1" max="6" value="2" />
+            </label>
+            <button id="start-trace" type="button">Start Trace-Back</button>
+          </div>
+          <p id="trace-status" class="meta"></p>
+        </div>
+      </section>
+
+      <section class="panel graph-panel">
+        <h2>5) Method Lineage Graph</h2>
+        <div id="graph-empty" class="empty">Graph will render here after trace completes.</div>
+        <div id="graph"></div>
+      </section>
+    </main>
+
+    <template id="paper-card-template">
+      <article class="paper-card">
+        <h4 class="paper-title"></h4>
+        <p class="paper-meta"></p>
+        <p class="paper-snippet"></p>
+        <div class="card-actions">
+          <button class="save-btn" type="button"></button>
+          <button class="detail-btn" type="button">Open Detail</button>
+          <button class="read-btn" type="button">Read Full Paper</button>
+        </div>
+      </article>
+    </template>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
