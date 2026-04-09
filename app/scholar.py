@@ -267,6 +267,9 @@ def normalize_paper(raw: dict) -> dict:
         "venue": raw.get("venue"),
         "authors": author_names,
         "citation_count": raw.get("citationCount") or 0,
+        "review_score_avg": raw.get("review_score_avg"),
+        "review_count": raw.get("review_count") or 0,
+        "decision": raw.get("decision"),
         "url": raw.get("url"),
         "references": raw.get("references") or [],
     }

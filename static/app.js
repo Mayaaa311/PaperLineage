@@ -9,6 +9,7 @@ let currentSearchState = null;
 let currentPage = 1;
 let totalPages = 1;
 let currentAllPaperIds = [];
+let currentCy = null;
 
 const searchForm = document.getElementById("search-form");
 const searchModeEl = document.getElementById("search-mode");
@@ -34,7 +35,9 @@ const detailReferences = document.getElementById("detail-references");
 const detailInsights = document.getElementById("detail-insights");
 const detailLogic = document.getElementById("detail-logic");
 const detailEvidence = document.getElementById("detail-evidence");
+const detailLimitations = document.getElementById("detail-limitations");
 const detailKeyDeps = document.getElementById("detail-key-deps");
+const detailDatasetDeps = document.getElementById("detail-dataset-deps");
 const traceStatus = document.getElementById("trace-status");
 
 const traceDepthInput = document.getElementById("trace-depth");
@@ -42,6 +45,8 @@ const startTraceBtn = document.getElementById("start-trace");
 
 const graphEmpty = document.getElementById("graph-empty");
 const graphEl = document.getElementById("graph");
+const edgeExplainer = document.getElementById("edge-explainer");
+const graphResetBtn = document.getElementById("graph-reset-view");
 
 function resolveReadableUrl(rawUrl) {
   if (typeof rawUrl !== "string") {
@@ -119,7 +124,11 @@ function renderPaperCards(container, papers, inFavorites = false) {
     const readBtn = card.querySelector(".read-btn");
 
     title.textContent = paper.title;
-    meta.textContent = `${paper.venue || "Unknown venue"} • ${paper.year || "Unknown year"} • Citations: ${paper.citation_count || 0}`;
+    const reviewText = (paper.review_score_avg !== null && paper.review_score_avg !== undefined)
+      ? ` • Review: ${Number(paper.review_score_avg).toFixed(2)}${paper.review_count ? ` (n=${paper.review_count})` : ""}`
+      : "";
+    const decisionText = paper.decision ? ` • Decision: ${paper.decision}` : "";
+    meta.textContent = `${paper.venue || "Unknown venue"} • ${paper.year || "Unknown year"} • Citations: ${paper.citation_count || 0}${reviewText}${decisionText}`;
     snippet.textContent = paper.abstract_snippet || "No abstract snippet available.";
 
     const setSaveButton = (saved) => {
@@ -336,14 +345,20 @@ async function loadPaperDetail(paperId) {
   detailInsights.innerHTML = "";
   detailLogic.textContent = "";
   detailEvidence.innerHTML = "";
+  detailLimitations.innerHTML = "";
   detailKeyDeps.innerHTML = "";
+  detailDatasetDeps.innerHTML = "";
   traceStatus.textContent = "";
   currentPaperId = paperId;
 
   try {
     const data = await api(`/api/papers/${paperId}?user_id=${encodeURIComponent(USER_ID)}`);
     detailTitle.textContent = data.title;
-    detailMeta.textContent = `${data.venue || "Unknown venue"} • ${data.year || "Unknown year"} • Citations: ${data.citation_count || 0}`;
+    const reviewText = (data.review_score_avg !== null && data.review_score_avg !== undefined)
+      ? ` • Review: ${Number(data.review_score_avg).toFixed(2)}${data.review_count ? ` (n=${data.review_count})` : ""}`
+      : "";
+    const decisionText = data.decision ? ` • Decision: ${data.decision}` : "";
+    detailMeta.textContent = `${data.venue || "Unknown venue"} • ${data.year || "Unknown year"} • Citations: ${data.citation_count || 0}${reviewText}${decisionText}`;
     currentPaperUrl = resolveReadableUrl(data.url);
     setDetailReadState(currentPaperUrl);
     detailAbstract.textContent = data.abstract || "No abstract available.";
@@ -351,7 +366,9 @@ async function loadPaperDetail(paperId) {
     renderBulletList(detailInsights, data.quick_takeaways, "No concise takeaways generated yet.");
     detailLogic.textContent = data.logic_summary || "No logic summary generated yet.";
     renderBulletList(detailEvidence, data.evidence_points, "No evidence summary generated yet.");
-    renderDependencyList(detailKeyDeps, data.key_dependencies || []);
+    renderBulletList(detailLimitations, data.limitations, "No explicit limitations extracted yet.");
+    renderDependencyList(detailKeyDeps, data.key_dependencies || [], "No high-confidence dependency extracted.");
+    renderDependencyList(detailDatasetDeps, data.dataset_dependencies || [], "No dataset/benchmark paper extracted.");
   } catch (err) {
     detailTitle.textContent = "Failed to load paper";
     detailMeta.textContent = "";
@@ -389,18 +406,30 @@ function renderBulletList(container, items, emptyText) {
   });
 }
 
-function renderDependencyList(container, deps) {
+function renderDependencyList(container, deps, emptyText) {
   container.innerHTML = "";
   if (!Array.isArray(deps) || !deps.length) {
     const li = document.createElement("li");
-    li.textContent = "No high-confidence dependency extracted.";
+    li.textContent = emptyText || "No dependency extracted.";
     container.appendChild(li);
     return;
   }
   deps.forEach((dep) => {
     const li = document.createElement("li");
     const confidence = Number.isFinite(dep.confidence) ? dep.confidence.toFixed(2) : "0.60";
-    li.textContent = `${dep.title || "Unknown paper"} (${dep.role || "dependency"}, confidence ${confidence}) — ${dep.reason || ""}`;
+    const title = dep.title || "Unknown paper";
+    const readableUrl = resolveReadableUrl(dep.url);
+    if (readableUrl) {
+      const link = document.createElement("a");
+      link.href = readableUrl;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = title;
+      li.appendChild(link);
+    } else {
+      li.appendChild(document.createTextNode(title));
+    }
+    li.appendChild(document.createTextNode(` (${dep.role || "dependency"}, confidence ${confidence}) — ${dep.reason || ""}`));
     container.appendChild(li);
   });
 }
@@ -419,6 +448,7 @@ async function startTrace() {
   }
   const traceDepth = parseInt(traceDepthInput.value, 10);
   traceStatus.textContent = "Starting trace-back job...";
+  currentCy = null;
   graphEl.style.display = "none";
   graphEmpty.style.display = "block";
   graphEmpty.textContent = "Tracing method lineage...";
@@ -467,24 +497,115 @@ async function pollTraceStatus(traceId) {
 }
 
 function renderGraph(traceData) {
+  const edgeTierFromConfidence = (confidence) => {
+    const value = Number.isFinite(confidence) ? confidence : 0.0;
+    if (value >= 0.78) {
+      return "high";
+    }
+    if (value >= 0.62) {
+      return "medium";
+    }
+    return "low";
+  };
+
+  const edgeColorFromTier = (tier) => {
+    if (tier === "high") {
+      return "#0f7b6c";
+    }
+    if (tier === "medium") {
+      return "#f39c12";
+    }
+    return "#d85b47";
+  };
+
+  const edgeWidthFromTier = (tier) => {
+    if (tier === "high") {
+      return 3.0;
+    }
+    if (tier === "medium") {
+      return 2.4;
+    }
+    return 1.9;
+  };
+
+  const edgeLineStyle = (relationType) => {
+    if (relationType === "foundational_method") {
+      return "solid";
+    }
+    if (relationType === "direct_technical_dependency") {
+      return "dashed";
+    }
+    return "solid";
+  };
+
+  const compactTitle = (title) => {
+    if (typeof title !== "string" || !title.trim()) {
+      return "Unknown paper";
+    }
+    const t = title.trim();
+    return t.length > 68 ? `${t.slice(0, 68)}...` : t;
+  };
+
+  const firstSentence = (text) => {
+    if (typeof text !== "string" || !text.trim()) {
+      return "";
+    }
+    const trimmed = text.trim();
+    const first = trimmed.split(/[.!?]/)[0].trim();
+    if (!first) {
+      return "";
+    }
+    return first.length > 120 ? `${first.slice(0, 120)}...` : `${first}.`;
+  };
+
+  const relationLabel = (relationType) => {
+    if (relationType === "foundational_method") {
+      return "foundational method";
+    }
+    if (relationType === "direct_technical_dependency") {
+      return "direct technical dependency";
+    }
+    return (relationType || "dependency").replaceAll("_", " ");
+  };
+
+  const relevanceLabel = (tier) => {
+    if (tier === "high") {
+      return "high relevance";
+    }
+    if (tier === "medium") {
+      return "medium relevance";
+    }
+    return "low relevance";
+  };
+
   const elements = [];
+  const nodeTitleById = new Map();
   traceData.nodes.forEach((node) => {
+    nodeTitleById.set(node.paper_id, node.title);
     elements.push({
       data: {
         id: node.paper_id,
         label: `${node.title.slice(0, 56)}${node.title.length > 56 ? "..." : ""}\nL${node.level}`,
+        fullTitle: node.title,
         level: node.level,
       },
     });
   });
 
   traceData.edges.forEach((edge, idx) => {
+    const confidence = Number.isFinite(edge.confidence) ? edge.confidence : 0.0;
+    const tier = edgeTierFromConfidence(confidence);
     elements.push({
       data: {
         id: `e-${idx}-${edge.source_paper_id}-${edge.target_paper_id}`,
         source: edge.source_paper_id,
         target: edge.target_paper_id,
-        label: `${edge.relation_type} (${edge.confidence.toFixed(2)})`,
+        relationType: edge.relation_type,
+        confidence,
+        tier,
+        color: edgeColorFromTier(tier),
+        width: edgeWidthFromTier(tier),
+        lineStyle: edgeLineStyle(edge.relation_type),
         reason: edge.reason,
       },
     });
@@ -493,6 +614,9 @@ function renderGraph(traceData) {
   graphEmpty.style.display = "none";
   graphEl.style.display = "block";
   graphEl.innerHTML = "";
+  if (edgeExplainer) {
+    edgeExplainer.textContent = "Click an edge to inspect the paper link.";
+  }
 
   const cy = cytoscape({
     container: graphEl,
@@ -526,17 +650,14 @@ function renderGraph(traceData) {
       {
         selector: "edge",
         style: {
-          width: 1.8,
+          width: "data(width)",
           "curve-style": "bezier",
-          "line-color": "#7a968b",
-          "target-arrow-color": "#7a968b",
+          "line-color": "data(color)",
+          "target-arrow-color": "data(color)",
           "target-arrow-shape": "triangle",
-          label: "data(label)",
-          "font-size": 8,
-          color: "#3a5547",
-          "text-background-color": "rgba(255,255,255,0.7)",
-          "text-background-opacity": 1,
-          "text-background-padding": 2,
+          "line-style": "data(lineStyle)",
+          opacity: 0.92,
+          "overlay-padding": 10,
         },
       },
     ],
@@ -556,10 +677,38 @@ function renderGraph(traceData) {
     loadPaperDetail(nodeId);
   });
 
-  cy.on("tap", "edge", (evt) => {
+  const onEdgeSelected = (evt) => {
     const edge = evt.target.data();
-    traceStatus.textContent = `Edge reason: ${edge.reason}`;
-  });
+    const srcTitle = compactTitle(nodeTitleById.get(edge.source) || "");
+    const dstTitle = compactTitle(nodeTitleById.get(edge.target) || "");
+    const rel = relationLabel(edge.relationType);
+    const relTier = relevanceLabel(edge.tier);
+    const reason = firstSentence(edge.reason);
+    const text = `${srcTitle} builds on ${dstTitle} (${rel}, ${relTier}). ${reason}`.trim();
+    traceStatus.textContent = text;
+    if (edgeExplainer) {
+      edgeExplainer.textContent = text;
+    }
+  };
+  cy.on("tap", "edge", onEdgeSelected);
+  cy.on("click", "edge", onEdgeSelected);
+  currentCy = cy;
+}
+
+function resetGraphView() {
+  if (!currentCy) {
+    traceStatus.textContent = "No graph to reset yet.";
+    return;
+  }
+  currentCy.animate(
+    {
+      fit: { padding: 22 },
+      duration: 260,
+    },
+    {
+      complete: () => currentCy.center(),
+    }
+  );
 }
 
 document.getElementById("refresh-favorites").addEventListener("click", loadFavorites);
@@ -580,6 +729,7 @@ nextPageBtn.addEventListener("click", () => {
   }
   executeSearch(currentPage + 1);
 });
+graphResetBtn.addEventListener("click", resetGraphView);
 
 createConferenceChips();
 updateSearchModeUI();

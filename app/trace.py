@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .db import SessionLocal
-from .llm import select_key_dependencies
+from .llm import explain_trace_edge, select_key_dependencies
 from .models import Paper, PaperAnalysis, TraceGraphEdge, TraceGraphNode, TraceRequest
 from .scholar import ScholarClient, normalize_paper
 from .utils import upsert_paper
@@ -328,6 +328,22 @@ def run_trace_job(trace_request_id: int) -> None:
                     if not isinstance(paper_payload, dict):
                         continue
                     ref_paper = upsert_paper(db, paper_payload)
+                edge_reason = explain_trace_edge(
+                    source_paper={
+                        "title": current.title,
+                        "abstract": current.abstract,
+                        "venue": current.venue,
+                        "year": current.year,
+                    },
+                    target_paper={
+                        "title": ref_paper.title,
+                        "abstract": ref_paper.abstract,
+                        "venue": ref_paper.venue,
+                        "year": ref_paper.year,
+                    },
+                    relation_type=str(candidate.get("role") or "direct_technical_dependency"),
+                    base_reason=str(candidate.get("reason") or ""),
+                )
                 _upsert_trace_node(db, trace_req.id, ref_paper.id, level + 1)
                 _upsert_trace_edge(
                     db,
@@ -336,7 +352,7 @@ def run_trace_job(trace_request_id: int) -> None:
                     ref_paper.id,
                     candidate["role"],
                     candidate["score"],
-                    candidate["reason"],
+                    edge_reason,
                 )
                 db.commit()
 

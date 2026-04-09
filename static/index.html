@@ -105,8 +105,16 @@
             <ul id="detail-evidence" class="analysis-list"></ul>
           </div>
           <div class="analysis-block">
+            <h4>Limitations / Risks</h4>
+            <ul id="detail-limitations" class="analysis-list"></ul>
+          </div>
+          <div class="analysis-block">
             <h4>Most Relied-On Prior Papers</h4>
             <ul id="detail-key-deps" class="analysis-list"></ul>
+          </div>
+          <div class="analysis-block">
+            <h4>Datasets / Benchmarks Used</h4>
+            <ul id="detail-dataset-deps" class="analysis-list"></ul>
           </div>
           <div class="trace-controls">
             <label>Trace depth
@@ -119,7 +127,26 @@
       </section>
 
       <section class="panel graph-panel">
-        <h2>5) Method Lineage Graph</h2>
+        <div class="section-header">
+          <h2>5) Method Lineage Graph</h2>
+          <button id="graph-reset-view" class="ghost-btn" type="button">Reset View</button>
+        </div>
+        <div class="graph-legend" id="graph-legend">
+          <span class="legend-item">
+            <span class="legend-swatch high"></span>
+            High relevance
+          </span>
+          <span class="legend-item">
+            <span class="legend-swatch medium"></span>
+            Medium relevance
+          </span>
+          <span class="legend-item">
+            <span class="legend-swatch low"></span>
+            Low relevance
+          </span>
+          <span class="legend-note">Click an edge to see why the papers are linked.</span>
+        </div>
+        <p id="edge-explainer" class="meta edge-explainer">Click an edge to inspect the paper link.</p>
         <div id="graph-empty" class="empty">Graph will render here after trace completes.</div>
         <div id="graph"></div>
       </section>

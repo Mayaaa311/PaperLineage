@@ -3,7 +3,7 @@ from __future__ import annotations
 import html as html_lib
 import hashlib
 import re
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -13,6 +13,9 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 )
 _HTML_CACHE: dict[str, str] = {}
+_OPENREVIEW_META_CACHE: dict[str, dict] = {}
+_OPENREVIEW_FETCH_COUNT = 0
+_OPENREVIEW_FETCH_LIMIT = 80
 DBLP_SLUGS: dict[str, str] = {
     "ICLR": "iclr",
     "ICML": "icml",
@@ -40,7 +43,15 @@ def _matches_query(title: str, query: str, search_mode: str) -> bool:
     return matched >= threshold
 
 
-def _make_paper(venue: str, year: int, title: str, url: str) -> dict:
+def _make_paper(
+    venue: str,
+    year: int,
+    title: str,
+    url: str,
+    review_score_avg: float | None = None,
+    review_count: int = 0,
+    decision: str | None = None,
+) -> dict:
     key = f"{venue}|{year}|{title}|{url}"
     external_id = "SCRAPE:" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:24]
     return {
@@ -51,6 +62,9 @@ def _make_paper(venue: str, year: int, title: str, url: str) -> dict:
         "venue": venue,
         "authors": [],
         "citation_count": 0,
+        "review_score_avg": review_score_avg,
+        "review_count": review_count,
+        "decision": decision,
         "url": url,
         "references": [],
     }
@@ -76,6 +90,168 @@ def _fetch_html(url: str) -> str:
         response.raise_for_status()
         _HTML_CACHE[url] = response.text
         return response.text
+
+
+def _coerce_content_value(value):
+    if isinstance(value, dict):
+        if "value" in value:
+            return value.get("value")
+        if "choices" in value and isinstance(value.get("choices"), list):
+            choices = value.get("choices") or []
+            return choices[0] if choices else None
+    return value
+
+
+def _extract_numeric_rating(value) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    match = re.search(r"(-?\d+(?:\.\d+)?)", text)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _extract_openreview_forum_id(url: str | None) -> str | None:
+    if not url:
+        return None
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
+    host = (parsed.netloc or "").lower()
+    if "openreview.net" not in host:
+        return None
+    query = parse_qs(parsed.query or "")
+    rid = (query.get("id") or [None])[0]
+    if rid:
+        return rid
+    path = parsed.path or ""
+    if "/pdf/" in path:
+        token = path.rstrip("/").split("/")[-1]
+        if token:
+            return token
+    return None
+
+
+def _iter_openreview_notes(payload: dict) -> list[dict]:
+    notes = payload.get("notes")
+    if not isinstance(notes, list):
+        return []
+    out: list[dict] = []
+    for note in notes:
+        if not isinstance(note, dict):
+            continue
+        out.append(note)
+        details = note.get("details")
+        if isinstance(details, dict):
+            direct_replies = details.get("directReplies") or details.get("direct_replies")
+            if isinstance(direct_replies, list):
+                for rep in direct_replies:
+                    if isinstance(rep, dict):
+                        out.append(rep)
+    return out
+
+
+def _parse_openreview_metadata(payload: dict) -> dict:
+    notes = _iter_openreview_notes(payload)
+    if not notes:
+        return {}
+
+    ratings: list[float] = []
+    best_decision: str | None = None
+
+    for note in notes:
+        content = note.get("content")
+        if not isinstance(content, dict):
+            continue
+        invitation = str(note.get("invitation") or "").lower()
+
+        # Ratings from review/meta-review notes.
+        for key in ("rating", "overall_rating", "recommendation", "score"):
+            raw = _coerce_content_value(content.get(key))
+            val = _extract_numeric_rating(raw)
+            if val is not None:
+                ratings.append(val)
+                break
+
+        # Decision field.
+        decision_raw = (
+            _coerce_content_value(content.get("decision"))
+            or _coerce_content_value(content.get("final_decision"))
+            or _coerce_content_value(content.get("venue"))
+        )
+        if decision_raw and ("decision" in invitation or "decision" in str(decision_raw).lower()):
+            best_decision = str(decision_raw).strip()
+        elif decision_raw and not best_decision and (
+            "accept" in str(decision_raw).lower()
+            or "reject" in str(decision_raw).lower()
+            or "poster" in str(decision_raw).lower()
+            or "oral" in str(decision_raw).lower()
+            or "spotlight" in str(decision_raw).lower()
+        ):
+            best_decision = str(decision_raw).strip()
+
+    out = {}
+    if ratings:
+        out["review_score_avg"] = round(sum(ratings) / len(ratings), 3)
+        out["review_count"] = len(ratings)
+    if best_decision:
+        out["decision"] = best_decision
+    return out
+
+
+def _fetch_openreview_metadata(forum_id: str) -> dict:
+    global _OPENREVIEW_FETCH_COUNT
+    cached = _OPENREVIEW_META_CACHE.get(forum_id)
+    if cached is not None:
+        return cached
+    if _OPENREVIEW_FETCH_COUNT >= _OPENREVIEW_FETCH_LIMIT:
+        _OPENREVIEW_META_CACHE[forum_id] = {}
+        return {}
+    _OPENREVIEW_FETCH_COUNT += 1
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json,text/plain,*/*",
+    }
+    candidates = [
+        f"https://api2.openreview.net/notes?forum={forum_id}&limit=1000&details=directReplies",
+        f"https://api.openreview.net/notes?forum={forum_id}&limit=1000&details=directReplies",
+    ]
+    parsed: dict = {}
+    with httpx.Client(timeout=httpx.Timeout(20.0), follow_redirects=True) as client:
+        for url in candidates:
+            try:
+                res = client.get(url, headers=headers)
+                if res.status_code != 200:
+                    continue
+                body = res.json()
+                parsed = _parse_openreview_metadata(body)
+                if parsed:
+                    break
+            except Exception:
+                continue
+    _OPENREVIEW_META_CACHE[forum_id] = parsed
+    return parsed
+
+
+def _attach_openreview_metadata(paper: dict) -> dict:
+    forum_id = _extract_openreview_forum_id(paper.get("url"))
+    if not forum_id:
+        return paper
+    meta = _fetch_openreview_metadata(forum_id)
+    if not meta:
+        return paper
+    if meta.get("review_score_avg") is not None:
+        paper["review_score_avg"] = meta.get("review_score_avg")
+    if meta.get("review_count") is not None:
+        paper["review_count"] = int(meta.get("review_count") or 0)
+    if meta.get("decision"):
+        paper["decision"] = meta.get("decision")
+    return paper
 
 
 def _scrape_dblp_conference(
@@ -126,7 +302,7 @@ def _scrape_dblp_conference(
             head_match = re.search(r'<div class="head"><a href="([^"]+)"', block)
             link = html_lib.unescape(head_match.group(1)) if head_match else url
 
-        papers.append(_make_paper(conf, year, title, link))
+        papers.append(_attach_openreview_metadata(_make_paper(conf, year, title, link)))
         if len(papers) >= max_results:
             break
 
@@ -143,7 +319,7 @@ def _scrape_neurips(year: int, query: str, search_mode: str, max_results: int) -
         if not title or not _matches_query(title, query, search_mode):
             continue
         link = urljoin("https://proceedings.neurips.cc", a.get("href", ""))
-        papers.append(_make_paper("NeurIPS", year, title, link))
+        papers.append(_attach_openreview_metadata(_make_paper("NeurIPS", year, title, link)))
         if len(papers) >= max_results:
             break
     return papers
@@ -159,7 +335,7 @@ def _scrape_cvpr(year: int, query: str, search_mode: str, max_results: int) -> l
         if not title or not _matches_query(title, query, search_mode):
             continue
         link = urljoin("https://openaccess.thecvf.com", a.get("href", ""))
-        papers.append(_make_paper("CVPR", year, title, link))
+        papers.append(_attach_openreview_metadata(_make_paper("CVPR", year, title, link)))
         if len(papers) >= max_results:
             break
     return papers
@@ -188,7 +364,7 @@ def _scrape_eccv(year: int, query: str, search_mode: str, max_results: int) -> l
             continue
         seen_titles.add(title_key)
         link = urljoin("https://www.ecva.net/", href)
-        papers.append(_make_paper("ECCV", year, title, link))
+        papers.append(_attach_openreview_metadata(_make_paper("ECCV", year, title, link)))
         if len(papers) >= max_results:
             break
     return papers
@@ -224,7 +400,7 @@ def _scrape_acl_family(
             continue
         seen.add(key)
         link = urljoin("https://aclanthology.org", href)
-        papers.append(_make_paper(conf, year, title, link))
+        papers.append(_attach_openreview_metadata(_make_paper(conf, year, title, link)))
         if len(papers) >= max_results:
             break
     return papers

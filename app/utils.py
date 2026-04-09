@@ -59,6 +59,9 @@ def upsert_paper(db: Session, normalized: dict) -> Paper:
             year=normalized.get("year"),
             authors_json=json.dumps(normalized.get("authors", [])),
             citation_count=normalized.get("citation_count") or 0,
+            review_score_avg=normalized.get("review_score_avg"),
+            review_count=normalized.get("review_count") or 0,
+            decision=normalized.get("decision"),
             url=normalized.get("url"),
         )
         db.add(paper)
@@ -72,6 +75,18 @@ def upsert_paper(db: Session, normalized: dict) -> Paper:
     if normalized.get("authors"):
         paper.authors_json = json.dumps(normalized["authors"])
     paper.citation_count = max(paper.citation_count, normalized.get("citation_count") or 0)
+    if normalized.get("review_score_avg") is not None:
+        try:
+            paper.review_score_avg = float(normalized.get("review_score_avg"))
+        except (TypeError, ValueError):
+            pass
+    if normalized.get("review_count") is not None:
+        try:
+            paper.review_count = max(paper.review_count or 0, int(normalized.get("review_count") or 0))
+        except (TypeError, ValueError):
+            pass
+    if normalized.get("decision"):
+        paper.decision = normalized.get("decision")
     paper.url = normalized.get("url") or paper.url
     db.flush()
     return paper
@@ -89,6 +104,9 @@ def paper_to_output(paper: Paper, is_favorited: bool = False) -> dict:
         "year": paper.year,
         "abstract_snippet": snippet,
         "citation_count": paper.citation_count or 0,
+        "review_score_avg": paper.review_score_avg,
+        "review_count": paper.review_count or 0,
+        "decision": paper.decision,
         "url": paper.url,
         "is_favorited": is_favorited,
     }

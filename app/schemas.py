@@ -27,6 +27,9 @@ class PaperOut(BaseModel):
     year: int | None = None
     abstract_snippet: str
     citation_count: int = 0
+    review_score_avg: float | None = None
+    review_count: int = 0
+    decision: str | None = None
     url: str | None = None
     is_favorited: bool = False
 
@@ -75,9 +78,16 @@ class PaperReferenceOut(BaseModel):
     year: int | None = None
     venue: str | None = None
     citation_count: int = 0
+    url: str | None = None
 
 
 class KeyDependencyOut(PaperReferenceOut):
+    role: str
+    confidence: float
+    reason: str
+
+
+class DatasetDependencyOut(PaperReferenceOut):
     role: str
     confidence: float
     reason: str
@@ -92,6 +102,9 @@ class PaperDetailResponse(BaseModel):
     venue: str | None = None
     year: int | None = None
     citation_count: int = 0
+    review_score_avg: float | None = None
+    review_count: int = 0
+    decision: str | None = None
     url: str | None = None
     is_favorited: bool = False
     references_count: int = 0
@@ -99,8 +112,10 @@ class PaperDetailResponse(BaseModel):
     quick_takeaways: list[str] = Field(default_factory=list)
     logic_summary: str = ""
     evidence_points: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
     analysis_model: str | None = None
     key_dependencies: list[KeyDependencyOut] = Field(default_factory=list)
+    dataset_dependencies: list[DatasetDependencyOut] = Field(default_factory=list)
 
 
 class TraceStartRequest(BaseModel):

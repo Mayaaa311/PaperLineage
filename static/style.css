@@ -291,6 +291,11 @@ form button,
   color: var(--muted);
 }
 
+.edge-explainer {
+  margin: 0 0 10px;
+  min-height: 18px;
+}
+
 .paper-list {
   display: grid;
   gap: 10px;
@@ -391,6 +396,44 @@ form button,
   border: 1px solid rgba(72, 101, 87, 0.22);
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.78);
+}
+
+.graph-legend {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-swatch {
+  width: 16px;
+  height: 4px;
+  border-radius: 999px;
+}
+
+.legend-swatch.high {
+  background: #0f7b6c;
+}
+
+.legend-swatch.medium {
+  background: #f39c12;
+}
+
+.legend-swatch.low {
+  background: #d85b47;
+}
+
+.legend-note {
+  opacity: 0.9;
 }
 
 @media (max-width: 1080px) {
